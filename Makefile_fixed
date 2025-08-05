@@ -1,0 +1,8 @@
+debug: _DEBUG=-g -Wall
+debug: btor2verilog_fixed
+
+btor2verilog_fixed: main.cpp btor2verilog_fixed.cpp
+	${CXX} ${_DEBUG} -Wl,-rpath,./deps/btor2tools/build/lib -std=c++11 -I. -I./deps/btor2tools/src -L./deps/btor2tools/build/lib/ -o btor2verilog_fixed main.cpp btor2verilog_fixed.cpp -lbtor2parser
+
+clean:
+	rm -f btor2verilog btor2verilog_fixed 

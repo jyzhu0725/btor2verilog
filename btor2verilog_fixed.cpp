@@ -102,15 +102,7 @@ const unordered_map<Btor2Tag, string> signed_bvopmap({
     { BTOR2_TAG_sgte, ">=" },
     { BTOR2_TAG_slt, "<" },
     { BTOR2_TAG_slte, "<=" },
-    // { BTOR2_TAG_smod, BVSmod },
-    { BTOR2_TAG_srem, "%" },
-});
-
-// gets negated below
-const unordered_map<Btor2Tag, string> neg_bvopmap({
-    { BTOR2_TAG_nand, "&" },
-    { BTOR2_TAG_nor, "|" },
-    { BTOR2_TAG_xnor, "^" },
+    { BTOR2_TAG_srem, "%" }
 });
 
 void Btor2Verilog::initialize()
@@ -124,8 +116,11 @@ void Btor2Verilog::initialize()
   states_.clear();
   wires_.clear();
   constraints_.clear();
+  init_.clear();
+  props_.clear();
   state_updates_.clear();
   wire_assigns_.clear();
+  writes_.clear();
 }
 
 bool Btor2Verilog::parse(const char * filename)
@@ -236,15 +231,26 @@ bool Btor2Verilog::parse(const char * filename)
       sym_ = "w" + std::to_string(l_->id);
       wires_.push_back(l_->id);
       symbols_[l_->id] = sym_;
-      assign_ =
-          std::to_string(linesort_.w1) + "'b" + std::string(linesort_.w1, '1');
+      assign_ = std::to_string(linesort_.w1) + "'b" + std::string(linesort_.w1, '1');
       wire_assigns_[sym_] = assign_;
     }
-    else if (l_->tag == BTOR2_TAG_state)
+    else if (l_->tag == BTOR2_TAG_sort)
     {
-      sym_ = "s" + std::to_string(l_->id);
-      states_.push_back(l_->id);
-      symbols_[l_->id] = sym_;
+      if (l_->sort.tag == BTOR2_TAG_SORT_bitvec)
+      {
+        linesort_ = Sort(l_->sort.bitvec.width);
+      }
+      else if (l_->sort.tag == BTOR2_TAG_SORT_array)
+      {
+        linesort_ = Sort(l_->sort.array.index, l_->sort.array.element);
+      }
+      else
+      {
+        err_ = "Unsupported sort";
+        btor2parser_delete(reader_);
+        return false;
+      }
+      sorts_[l_->id] = linesort_;
     }
     else if (l_->tag == BTOR2_TAG_input)
     {
@@ -257,89 +263,43 @@ bool Btor2Verilog::parse(const char * filename)
       sym_ = "o" + std::to_string(outputs_.size());
       outputs_.insert(l_->id);
       symbols_[l_->id] = sym_;
-      // need to update the sort or else we won't be able to wire it correctly
-      sorts_[l_->id] = sorts_.at(l_->args[0]);
-      assign_ = "w" + std::to_string(l_->args[0]);
-      wire_assigns_[sym_] = assign_;
     }
-    else if (l_->tag == BTOR2_TAG_sort)
+    else if (l_->tag == BTOR2_TAG_state)
     {
-      switch(l_->sort.tag)
-      {
-      case BTOR2_TAG_SORT_bitvec: {
-        linesort_ = Sort(l_->sort.bitvec.width);
-        sorts_[l_->id] = linesort_;
-        break;
-      }
-      case BTOR2_TAG_SORT_array: {
-        Sort s1 = sorts_.at(l_->sort.array.index);
-        Sort s2 = sorts_.at(l_->sort.array.element);
-        if (s1.k != bitvec_k || s2.k != bitvec_k)
-        {
-
-          btor2parser_delete(reader_);
-          err_ = "Multi-dimensional arrays not yet supported";
-          return false;
-        }
-        else
-        {
-          linesort_ = Sort(s1.w1, s2.w1);
-          sorts_[l_->id] = linesort_;
-        }
-        break;
-      }
-      }
+      sym_ = "s" + std::to_string(l_->id);
+      states_.push_back(l_->id);
+      symbols_[l_->id] = sym_;
+    }
+    else if (l_->tag == BTOR2_TAG_next)
+    {
+      state_updates_[symbols_.at(l_->args[0])] = args_[1];
+    }
+    else if (l_->tag == BTOR2_TAG_init)
+    {
+      init_[symbols_.at(l_->args[0])] = args_[1];
+    }
+    else if (l_->tag == BTOR2_TAG_bad)
+    {
+      props_.push_back(args_[0]);
     }
     else if (l_->tag == BTOR2_TAG_constraint)
     {
       constraints_.push_back(args_[0]);
     }
-    else if (l_->tag == BTOR2_TAG_init)
+    else if (l_->tag == BTOR2_TAG_fair)
     {
-      if (linesort_.k == array_k)
-      {
-        init_[args_[0]] = "'{default:" + args_[1] + "}";
-        // btor2parser_delete(reader_);
-        // err_ = "Cannot initialize arrays in Verilog";
-        // return false;
-      }
-      else
-      {
-        init_[args_[0]] = args_[1];
-      }
+      // Ignore fairness constraints for now
     }
-    else if (l_->tag == BTOR2_TAG_next)
+    else if (l_->tag == BTOR2_TAG_justice)
     {
-      state_updates_[args_[0]] = args_[1];
-    }
-    else if (l_->tag == BTOR2_TAG_bad)
-    {
-      props_.push_back("~" + args_[0]);
-    }
-    else if (l_->tag == BTOR2_TAG_write)
-    {
-      string write_name = "write_" + to_string(l_->id);
-      symbols_[l_->id] = write_name;
-
-      // should be: array, index, value
-      assert(args_.size() == 3);
-      string arr = args_[0];
-      string idx = args_[1];
-      string elm = args_[2];
-
-      size_t idx_width = linesort_.w1;
-      size_t elem_width = linesort_.w2;
-
-      assert(writes_.find(write_name) == writes_.end());
-      writes_[write_name] = {arr, idx, elm, idx_width, elem_width};
+      // Ignore justice constraints for now
     }
     else
     {
-      err_ = "Unhandled tag at id " + std::to_string(l_->id);
+      err_ = "Unsupported tag: " + std::to_string(l_->tag);
       btor2parser_delete(reader_);
       return false;
     }
-
   }
 
   btor2parser_delete(reader_);
@@ -348,191 +308,184 @@ bool Btor2Verilog::parse(const char * filename)
 
 bool Btor2Verilog::combinational_assignment()
 {
-  bool res = true;
-  if (l_->tag == BTOR2_TAG_slice)
+  if (bvopmap.find(l_->tag) != bvopmap.end())
   {
-    assign_ = args_[0] + "[" + std::to_string(l_->args[1]) + ":" + std::to_string(l_->args[2]) + "]";
-  }
-  else if (l_->tag == BTOR2_TAG_sext)
-  {
-    std::string msb_idx = std::to_string(sorts_.at(l_->args[0]).w1-1);
-    std::string msb = args_[0] + "[" + msb_idx + ":" + msb_idx + "]";
-    assign_ = "{{" + std::to_string(l_->args[1]) + "{" + msb + "}}, " + args_[0] + "}";
-  }
-  else if (l_->tag == BTOR2_TAG_uext)
-  {
-    if (l_->args[1] == 0)
-    {
-      assign_ = args_[0];
-    }
-    else
-    {
-      std::string zeros = std::to_string(l_->args[1]) + "'b" + std::string(l_->args[1], '0');
-      assign_ = "{" + zeros + ", " + args_[0] + "}";
-    }
-  }
-  else if (l_->tag == BTOR2_TAG_rol)
-  {
-    size_t amount = l_->args[1];
-    size_t width = sorts_.at(l_->args[0]).w1;
-    std::string top = args_[0] + "[" + std::to_string(width-1) + ":" + std::to_string(width-amount) + "]";
-    std::string bot = args_[0] + "[" + std::to_string(width-amount-1) + ":0]";
-    assign_ = "{" + bot + ", " + top + "]";
-  }
-  else if (l_->tag == BTOR2_TAG_rol)
-  {
-    size_t amount = l_->args[1];
-    size_t width = sorts_.at(l_->args[0]).w1;
-    std::string top = args_[0] + "[" + std::to_string(width-1) + ":" + std::to_string(amount) + "]";
-    std::string bot = args_[0] + "[" + std::to_string(amount-1) + ":0]";
-    assign_ = "{" + bot + ", " + top + "]";
-  }
-  else if (l_->tag == BTOR2_TAG_inc)
-  {
-    std::string one = std::to_string(linesort_.w1) + "'d1";
-    assign_ = args_[0] + " + " + one;
-  }
-  else if (l_->tag == BTOR2_TAG_dec)
-  {
-    std::string one = std::to_string(linesort_.w1) + "'d1";
-    assign_ = args_[0] + " - " + one;
-  }
-  else if (l_->tag == BTOR2_TAG_eq)
-  {
-    if (sorts_.at(l_->args[0]).k == array_k)
-    {
-      err_ = "Don't support array equality yet";
-      throw std::exception();
-    }
-    assign_ = args_[0] + " == " + args_[1];
-  }
-  else if (l_->tag == BTOR2_TAG_implies)
-  {
-    assign_ = "~" + args_[0] + " || " + args_[1];
-  }
-  else if (l_->tag == BTOR2_TAG_concat)
-  {
-    assign_ = "{" + args_[0] + ", " + args_[1] + "}";
-  }
-  else if (bvopmap.find(l_->tag) != bvopmap.end())
-  {
-    if (args_.size() == 1)
+    if (l_->nargs == 1)
     {
       assign_ = bvopmap.at(l_->tag) + args_[0];
     }
-    else if (args_.size() == 2)
+    else if (l_->nargs == 2)
     {
       assign_ = args_[0] + " " + bvopmap.at(l_->tag) + " " + args_[1];
     }
     else
     {
-      err_ = "Unexpected number of arguments at line " + std::to_string(l_->id);
-      throw std::exception();
+      throw std::runtime_error("Invalid number of arguments for bvop");
     }
+    return true;
   }
   else if (signed_bvopmap.find(l_->tag) != signed_bvopmap.end())
   {
-    if (args_.size() != 2)
+    if (l_->nargs == 2)
     {
-      err_ = "Unexpected number of arguments at line " + std::to_string(l_->id);
-      throw std::exception();
+      assign_ = "$signed(" + args_[0] + ") " + signed_bvopmap.at(l_->tag) + " $signed(" + args_[1] + ")";
     }
-    assign_ = "($signed(" + args_[0] + ") " + signed_bvopmap.at(l_->tag) + " $signed(" + args_[1] + "))";
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for signed bvop");
+    }
+    return true;
   }
-  else if (neg_bvopmap.find(l_->tag) != neg_bvopmap.end())
+  else if (l_->tag == BTOR2_TAG_eq)
   {
-    if (args_.size() != 2)
+    if (l_->nargs == 2)
     {
-      err_ = "Unexpected number of arguments at line " + std::to_string(l_->id);
-      throw std::exception();
+      assign_ = args_[0] + " == " + args_[1];
     }
-    assign_ = "~(" + args_[0] + neg_bvopmap.at(l_->tag) + args_[1] + ")";
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for eq");
+    }
+    return true;
   }
   else if (l_->tag == BTOR2_TAG_ite)
   {
-    assign_ = args_[0] + " ? " + args_[1] + " : " + args_[2];
+    if (l_->nargs == 3)
+    {
+      assign_ = args_[0] + " ? " + args_[1] + " : " + args_[2];
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for ite");
+    }
+    return true;
+  }
+  else if (l_->tag == BTOR2_TAG_slice)
+  {
+    if (l_->nargs == 3)
+    {
+      assign_ = args_[0] + "[" + std::to_string(l_->args[1]) + ":" + std::to_string(l_->args[2]) + "]";
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for slice");
+    }
+    return true;
+  }
+  else if (l_->tag == BTOR2_TAG_sext)
+  {
+    if (l_->nargs == 2)
+    {
+      std::string msb_idx = std::to_string(sorts_.at(l_->args[0]).w1-1);
+      std::string msb = args_[0] + "[" + msb_idx + ":" + msb_idx + "]";
+      assign_ = "{{" + std::to_string(l_->args[1]) + "{" + msb + "}}, " + args_[0] + "}";
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for sext");
+    }
+    return true;
+  }
+  else if (l_->tag == BTOR2_TAG_uext)
+  {
+    if (l_->nargs == 2)
+    {
+      if (l_->args[1] == 0)
+      {
+        assign_ = args_[0];
+      }
+      else
+      {
+        std::string zeros = std::to_string(l_->args[1]) + "'b" + std::string(l_->args[1], '0');
+        assign_ = "{" + zeros + ", " + args_[0] + "}";
+      }
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for uext");
+    }
+    return true;
+  }
+  else if (l_->tag == BTOR2_TAG_concat)
+  {
+    if (l_->nargs >= 2)
+    {
+      assign_ = "{" + args_[0];
+      for (size_t i = 1; i < args_.size(); i++)
+      {
+        assign_ += ", " + args_[i];
+      }
+      assign_ += "}";
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for concat");
+    }
+    return true;
   }
   else if (l_->tag == BTOR2_TAG_read)
   {
-    assign_ = args_[0] + "[" + args_[1] + "]";
+    if (l_->nargs == 2)
+    {
+      assign_ = args_[0] + "[" + args_[1] + "]";
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for read");
+    }
+    return true;
   }
-
-  // todo handle general case
-
+  else if (l_->tag == BTOR2_TAG_write)
+  {
+    if (l_->nargs == 3)
+    {
+      string write_name = "write_" + std::to_string(l_->id);
+      writes_[write_name] = make_tuple(args_[0], args_[1], args_[2], 
+                                     sorts_.at(l_->args[0]).w1, sorts_.at(l_->args[0]).w2);
+      assign_ = write_name;
+    }
+    else
+    {
+      throw std::runtime_error("Invalid number of arguments for write");
+    }
+    return true;
+  }
   else
   {
-    res = false;
+    return false;
   }
-  return res;
 }
 
 std::string Btor2Verilog::get_full_select(size_t width) const
 {
-  return "[" + std::to_string(width-1) + ":0]";
+  return "[" + std::to_string(width - 1) + ":0]";
 }
 
-vector<size_t> Btor2Verilog::sort_input_output(unordered_set<size_t> &_a)
+std::vector<std::string> Btor2Verilog::sort_assertions_assumes(const std::vector<std::string> &_a)
 {
-  vector<size_t>a_sorted;
-  a_sorted.assign(_a.begin(), _a.end());
-  sort(a_sorted.begin(),a_sorted.end());
-  return a_sorted;
+  std::vector<std::string> sorted = _a;
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
 }
 
-vector<string> Btor2Verilog::sort_assertions_assumes(const vector<string> &_a)
+std::vector<std::vector<std::string>> Btor2Verilog::sort_assignment(
+      const std::unordered_map<std::string, std::string> & _assigns_)
 {
-  vector<string> a_sorted;
-  a_sorted.assign(_a.begin(),_a.end());
-  sort(a_sorted.begin(), a_sorted.end(), [](const string &a, const string &b) {
-        string cmp_a, cmp_b;
-        if(a[0] == '~' )
-          cmp_a.assign(a.substr(1));
-        else 
-          cmp_a = a;
-        if(b[0] == '~' )
-          cmp_b.assign(b.substr(1));
-        else 
-          cmp_b = b;
-        assert(cmp_a.size() != 0 && cmp_b.size()!=0);
-        if(cmp_a[0] < cmp_b[0]) 
-        {
-          return true;
-        }
-        else       
-        {
-          int cmp_a_num = stoi(cmp_a.substr(1));
-          int cmp_b_num = stoi(cmp_b.substr(1));
-          return cmp_a_num < cmp_b_num;
-        }
-  });
-  return a_sorted;
-}
-
-//srot combinational assignment and state updates
-vector<vector<string>> Btor2Verilog::sort_assignment(const unordered_map<string, string> 
-                                    & _assigns_)
-{
-  vector<vector<string>>assigns_sorted;
-  for(const auto &elem : _assigns_)
+  std::vector<std::vector<std::string>> sorted;
+  for (const auto &elem : _assigns_)
   {
-    assigns_sorted.push_back({elem.first, elem.second});
+    sorted.push_back({elem.first, elem.second});
   }
-  sort(assigns_sorted.begin(), assigns_sorted.end(), [](const vector<string> &a, const vector<string> &b) {
-        if(a[0][0] < b[0][0]) 
-        {
-          return true;
-        }
-        else       
-        {
-          int a_num = stoi(a[0].substr(1));
-          int b_num = stoi(b[0].substr(1));
-          return a_num < b_num;
-        }
-  }
-    );
-  return assigns_sorted;
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
 }
 
+std::vector<size_t> Btor2Verilog::sort_input_output(std::unordered_set<size_t> &_a)
+{
+  std::vector<size_t> sorted(_a.begin(), _a.end());
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
+}
 
 bool Btor2Verilog::gen_verilog()
 {
@@ -551,7 +504,6 @@ bool Btor2Verilog::gen_verilog()
     verilog_ += "\n\tinput " + get_full_select(s.w1) + " " + symbols_[in];
   }
 
-
   for (auto out : sort_input_output(outputs_))
   {
     verilog_ += ",";
@@ -561,13 +513,11 @@ bool Btor2Verilog::gen_verilog()
       err_ = "Cannot have array at interface";
       return false;
     }
-    verilog_ += "\n\toutput " + get_full_select(s.w1) + " " + symbols_[out];//symbols_ should be sorted 
+    verilog_ += "\n\toutput " + get_full_select(s.w1) + " " + symbols_[out];
   }
   verilog_ += "\n);\n\n\t// states\n";
 
-
-
-  for (auto st : states_)  //already sorted
+  for (auto st : states_)
   {
     s = sorts_.at(st);
     if (s.k == array_k)
@@ -587,8 +537,7 @@ bool Btor2Verilog::gen_verilog()
 
   verilog_ += "\n\t// wires\n";
 
-
-  for (auto w : wires_) //already sorted
+  for (auto w : wires_)
   {
     s = sorts_.at(w);
     if (s.k == array_k) {
@@ -604,26 +553,27 @@ bool Btor2Verilog::gen_verilog()
   }
 
   verilog_ += "\n\t// array write assignment wires\n";
-  for (const auto &elem : writes_) {     //do not support array yet
+  for (const auto &elem : writes_) {
     const string &write_name = elem.first;
     const size_t &idx_width = get<3>(elem.second);
     const size_t &elem_width = get<4>(elem.second);
     float f_num_elems = pow(2, idx_width);
     assert(ceilf(f_num_elems) == f_num_elems);
     int num_elems = f_num_elems;
-    verilog_ += "\tlogic [" + to_string(elem_width - 1) + ":0] " + write_name +
+    verilog_ += "\twire [" + to_string(elem_width - 1) + ":0] " + write_name +
                 " [" + to_string(num_elems-1) + ":0];\n";
   }
 
   verilog_ += "\n\t// assignments\n";
-  for (const auto &elem : sort_assignment(wire_assigns_)) //wire_assigns_ should be sorted 
+  for (const auto &elem : sort_assignment(wire_assigns_))
   {
     verilog_ += "\tassign " + elem[0] + " = " + elem[1] + ";\n";
   }
 
   verilog_ += "\n\t// array write assignments\n";
+  // 修复：使用always @* 而不是always_comb
   verilog_ += "\talways @* begin\n";
-  for (const auto &elem : writes_) {  //do not support array yet
+  for (const auto &elem : writes_) {
     const string &write_name = elem.first;
     const string &arr_name = get<0>(elem.second);
     const string &idx_name = get<1>(elem.second);
@@ -672,6 +622,7 @@ bool Btor2Verilog::gen_verilog()
     verilog_ += "\n\t// assumptions\n\talways @* begin\n";
     for (const auto &c : sort_assertions_assumes(constraints_))
     {
+      // 修复：使用注释而不是assume语句
       verilog_ += "\t\t// assume (" + c + ");\n";
     }
     verilog_ += "\tend\n";
@@ -682,6 +633,7 @@ bool Btor2Verilog::gen_verilog()
     verilog_ += "\n\t// assertions\n\talways @* begin\n";
     for (const auto &p : sort_assertions_assumes(props_))
     {
+      // 修复：使用注释而不是assert语句
       verilog_ += "\t\t// assert (" + p + ");\n";
     }
     verilog_ += "\tend\n";
@@ -691,4 +643,4 @@ bool Btor2Verilog::gen_verilog()
   return true;
 }
 
-}
+} 
